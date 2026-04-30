@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Form Auto Filler</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <h1>Form Auto Filler</h1>
+        <p>Save answers by question title, then fill the active Google Form.</p>
+      </header>
+
+      <section class="status" id="status">Ready</section>
+
+      <label class="field">
+        <span>Form URL contains</span>
+        <input id="urlMatch" type="text" placeholder="1FAIpQL..." />
+      </label>
+
+      <label class="check">
+        <input id="autoFill" type="checkbox" />
+        <span>Auto-fill when this form opens</span>
+      </label>
+
+      <label class="field">
+        <span>Answers JSON</span>
+        <textarea id="answers" spellcheck="false" placeholder='{"Your name": "Rahul"}'></textarea>
+      </label>
+
+      <div class="actions">
+        <button id="detect" type="button">Detect Questions</button>
+        <button id="save" type="button">Save</button>
+        <button id="fill" type="button" class="primary">Fill Form</button>
+      </div>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
