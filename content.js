@@ -1,191 +1,224 @@
-const FORM_ID = "1FAIpQLScESH6cTuLj9Bb9gbMavsPe6Zod-aewo0RU6_3eIDFFMPVwVA";
-
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  run(message)
-    .then(sendResponse)
-    .catch((error) => sendResponse({ ok: false, error: error.message }));
-  return true;
-});
-
-bootstrapAutoFill();
-
-async function bootstrapAutoFill() {
-  const settings = await chrome.storage.sync.get({
-    urlMatch: FORM_ID,
-    autoFill: false,
-    answers: {}
-  });
-
-  if (!settings.autoFill) return;
-  if (settings.urlMatch && !location.href.includes(settings.urlMatch)) return;
-
-  await waitForQuestions();
-  fillGoogleForm(settings.answers || {});
-}
-
-async function run(message) {
-  if (message.type === "DETECT_QUESTIONS") {
-    await waitForQuestions();
-    return { ok: true, questions: getQuestions().map(questionSummary) };
-  }
-
-  if (message.type === "FILL_FORM") {
-    await waitForQuestions();
-    const result = fillGoogleForm(message.answers || {});
-    return { ok: true, ...result };
-  }
-
-  return { ok: false, error: "Unknown command." };
-}
-
-function fillGoogleForm(answers) {
-  const questions = getQuestions();
-  let filled = 0;
-  let missed = 0;
-
-  for (const [answerKey, answerValue] of Object.entries(answers)) {
-    if (answerValue === "" || answerValue == null) continue;
-
-    const question = findQuestion(questions, answerKey);
-    if (!question) {
-      missed += 1;
-      continue;
-    }
-
-    if (fillQuestion(question, answerValue)) {
-      filled += 1;
-    } else {
-      missed += 1;
-    }
-  }
-
-  return { filled, missed };
-}
-
-function getQuestions() {
-  return [...document.querySelectorAll("div[role='listitem']")]
-    .map((element) => ({
-      element,
-      title: getQuestionTitle(element),
-      text: normalize(element.innerText)
-    }))
-    .filter((question) => question.title || question.text);
-}
-
-function questionSummary(question) {
-  return {
-    title: question.title || question.text.slice(0, 80),
-    type: getQuestionType(question.element)
-  };
-}
-
-function getQuestionTitle(questionElement) {
-  const titleElement =
-    questionElement.querySelector(".M7eMe") ||
-    questionElement.querySelector("[role='heading']") ||
-    questionElement.querySelector(".HoXoMd");
-
-  return normalize(titleElement?.innerText || "");
-}
-
-function findQuestion(questions, answerKey) {
-  const normalizedKey = normalize(answerKey);
-  return (
-    questions.find((question) => normalize(question.title) === normalizedKey) ||
-    questions.find((question) => normalize(question.title).includes(normalizedKey)) ||
-    questions.find((question) => question.text.includes(normalizedKey))
-  );
-}
-
-function fillQuestion(question, answerValue) {
-  const element = question.element;
-  const answers = Array.isArray(answerValue) ? answerValue : [answerValue];
-
-  if (fillText(element, String(answerValue))) return true;
-  if (fillRadio(element, String(answerValue))) return true;
-  if (fillCheckboxes(element, answers.map(String))) return true;
-  if (fillDropdown(element, String(answerValue))) return true;
-
-  return false;
-}
-
-function fillText(questionElement, value) {
-  const input = questionElement.querySelector("input[type='text'], input[type='email'], input[type='number'], textarea");
-  if (!input) return false;
-
-  input.focus();
-  setNativeValue(input, value);
-  input.dispatchEvent(new Event("input", { bubbles: true }));
-  input.dispatchEvent(new Event("change", { bubbles: true }));
-  input.blur();
-  return true;
-}
-
-function fillRadio(questionElement, value) {
-  const radios = [...questionElement.querySelectorAll("[role='radio']")];
-  if (!radios.length) return false;
-
-  const target = radios.find((radio) => optionMatches(radio, value));
-  if (!target) return false;
-
-  target.click();
-  return true;
-}
-
-function fillCheckboxes(questionElement, values) {
-  const checkboxes = [...questionElement.querySelectorAll("[role='checkbox']")];
-  if (!checkboxes.length) return false;
-
-  let changed = false;
-  for (const value of values) {
-    const target = checkboxes.find((checkbox) => optionMatches(checkbox, value));
-    if (target && target.getAttribute("aria-checked") !== "true") {
-      target.click();
-      changed = true;
-    }
-  }
-
-  return changed;
-}
-
-function fillDropdown(questionElement, value) {
-  const listbox = questionElement.querySelector("[role='listbox']");
-  if (!listbox) return false;
-
-  listbox.click();
-
-  const options = [...document.querySelectorAll("[role='option']")];
-  const target = options.find((option) => optionMatches(option, value));
-  if (!target) {
-    document.body.click();
+  if (message?.type !== "IRCTC_AUTO_FILL") {
     return false;
   }
 
-  target.click();
+  fillPassengers(message.payload)
+    .then((result) => sendResponse(result))
+    .catch((error) => {
+      sendResponse({
+        ok: false,
+        message: error?.message || "Passenger fill karte waqt error aa gaya."
+      });
+    });
+
   return true;
+});
+
+async function fillPassengers(payload) {
+  const passengers = parsePassengers(payload?.rawText || "");
+
+  if (!passengers.length) {
+    return {
+      ok: false,
+      message: "Koi valid passenger line nahi mili. Format rakhiye: RAMESH 43 M"
+    };
+  }
+
+  const defaults = payload?.defaults || {};
+  const berthAssignments = getBerthAssignments(passengers, defaults.berthChoice);
+  await ensurePassengerForms(passengers.length);
+
+  const forms = getPassengerForms();
+  if (!forms.length) {
+    return {
+      ok: false,
+      message: "Passenger form page par detect nahi hua."
+    };
+  }
+
+  for (let index = 0; index < passengers.length; index += 1) {
+    const passenger = passengers[index];
+    const form = forms[index];
+
+    if (!form) {
+      throw new Error(`Passenger form ${index + 1} tak nahi ban paya.`);
+    }
+
+    await fillPassengerForm(form, passenger, defaults, berthAssignments[index]);
+  }
+
+  fillContactDetails(defaults);
+
+  return {
+    ok: true,
+    message: `${passengers.length} passenger auto-fill ho gaye.`
+  };
 }
 
-function optionMatches(optionElement, value) {
-  const optionText = normalize(optionElement.getAttribute("aria-label") || optionElement.innerText || "");
-  const wanted = normalize(value);
-  return optionText === wanted || optionText.includes(wanted);
+function parsePassengers(rawText) {
+  return rawText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map(parsePassengerLine)
+    .filter(Boolean);
 }
 
-function getQuestionType(questionElement) {
-  if (questionElement.querySelector("textarea")) return "paragraph";
-  if (questionElement.querySelector("input[type='text'], input[type='email'], input[type='number']")) return "text";
-  if (questionElement.querySelector("[role='radio']")) return "radio";
-  if (questionElement.querySelector("[role='checkbox']")) return "checkbox";
-  if (questionElement.querySelector("[role='listbox']")) return "dropdown";
-  return "unknown";
-}
-
-function normalize(value) {
-  return String(value || "")
+function parsePassengerLine(line) {
+  const cleaned = line
+    .replace(/^\d+\s*[\.\)\-]?\s*/, "")
     .replace(/\s+/g, " ")
-    .replace(/\*/g, "")
-    .trim()
-    .toLowerCase();
+    .trim();
+
+  const match = cleaned.match(/^(.*\S)\s+(\d{1,3})\s+(M|F|T|MALE|FEMALE|TRANSGENDER)$/i);
+  if (!match) {
+    return null;
+  }
+
+  const [, name, age, genderToken] = match;
+  const gender = normalizeGender(genderToken);
+
+  if (!gender) {
+    return null;
+  }
+
+  return {
+    name: name.trim(),
+    age: age.trim(),
+    gender
+  };
+}
+
+function normalizeGender(value) {
+  const upper = value.toUpperCase();
+  if (upper === "M" || upper === "MALE") {
+    return "M";
+  }
+  if (upper === "F" || upper === "FEMALE") {
+    return "F";
+  }
+  if (upper === "T" || upper === "TRANSGENDER") {
+    return "T";
+  }
+  return "";
+}
+
+async function ensurePassengerForms(requiredCount) {
+  let forms = getPassengerForms();
+
+  while (forms.length < requiredCount) {
+    const addPassengerLink = findAddPassengerLink();
+    if (!addPassengerLink) {
+      throw new Error("'+ Add Passenger' button nahi mila.");
+    }
+
+    addPassengerLink.click();
+    await wait(500);
+    forms = getPassengerForms();
+  }
+}
+
+function getPassengerForms() {
+  return Array.from(document.querySelectorAll("app-passenger")).filter((form) => {
+    return form.querySelector('[formcontrolname="passengerAge"]');
+  });
+}
+
+function findAddPassengerLink() {
+  const clickableNodes = Array.from(document.querySelectorAll("a, button, span"));
+  return clickableNodes.find((node) => {
+    const text = node.textContent?.replace(/\s+/g, " ").trim() || "";
+    return text.includes("+ Add Passenger");
+  }) || null;
+}
+
+async function fillPassengerForm(form, passenger, defaults, berthChoice) {
+  const nameInput =
+    form.querySelector('p-autocomplete[formcontrolname="passengerName"] input') ||
+    form.querySelector('p-autocomplete input[placeholder="Name"]') ||
+    form.querySelector('p-autocomplete input[placeholder*="Full Name"]') ||
+    form.querySelector('input[formcontrolname="passengerName"]') ||
+    form.querySelector('input[placeholder*="Full Name"]') ||
+    form.querySelector('input[placeholder="Name"]');
+
+  const ageInput = form.querySelector('input[formcontrolname="passengerAge"]');
+  const genderSelect = form.querySelector('select[formcontrolname="passengerGender"]');
+  const nationalitySelect = form.querySelector('select[formcontrolname="passengerNationality"]');
+  const berthSelect = form.querySelector('select[formcontrolname="passengerBerthChoice"]');
+
+  if (!nameInput || !ageInput || !genderSelect) {
+    throw new Error("Passenger fields expected format me nahi mile.");
+  }
+
+  setNativeValue(nameInput, passenger.name);
+  fireTextEvents(nameInput);
+  await wait(100);
+
+  setNativeValue(ageInput, passenger.age);
+  fireTextEvents(ageInput);
+
+  setSelectValue(genderSelect, passenger.gender);
+
+  if (nationalitySelect && defaults.nationality !== undefined) {
+    setSelectValue(nationalitySelect, defaults.nationality);
+  }
+
+  if (berthSelect && berthChoice !== undefined && hasSelectOption(berthSelect, berthChoice)) {
+    setSelectValue(berthSelect, berthChoice);
+  }
+}
+
+function hasSelectOption(select, value) {
+  if (value === "") {
+    return true;
+  }
+
+  return Array.from(select.options).some((option) => option.value === value);
+}
+
+function getBerthAssignments(passengers, berthChoice) {
+  if (berthChoice !== "AUTO") {
+    return passengers.map(() => berthChoice);
+  }
+
+  const rankedPassengers = passengers
+    .map((passenger, index) => ({
+      index,
+      age: Number.parseInt(passenger.age, 10) || 0
+    }))
+    .sort((left, right) => right.age - left.age || left.index - right.index);
+
+  const autoSequence = ["LB", "LB", "MB", "MB", "SL", "SU"];
+  const assignments = passengers.map(() => "");
+
+  rankedPassengers.forEach((passenger, rank) => {
+    assignments[passenger.index] = autoSequence[rank] || "";
+  });
+
+  return assignments;
+}
+
+function fillContactDetails(defaults) {
+  const mobileNumber = String(defaults.mobileNumber || "")
+    .replace(/\D/g, "")
+    .slice(0, 10);
+
+  if (!mobileNumber) {
+    return;
+  }
+
+  const mobileInput =
+    document.querySelector('input[formcontrolname="mobileNumber"]') ||
+    document.querySelector("#mobileNumber") ||
+    document.querySelector('input[name="mobileNumber"]');
+
+  if (!mobileInput) {
+    return;
+  }
+
+  setNativeValue(mobileInput, mobileNumber);
+  fireTextEvents(mobileInput);
 }
 
 function setNativeValue(element, value) {
@@ -193,27 +226,27 @@ function setNativeValue(element, value) {
     ? HTMLTextAreaElement.prototype
     : HTMLInputElement.prototype;
   const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
-  descriptor.set.call(element, value);
+
+  descriptor?.set?.call(element, value);
 }
 
-function waitForQuestions() {
-  return new Promise((resolve) => {
-    if (document.querySelector("div[role='listitem']")) {
-      resolve();
-      return;
-    }
-
-    const observer = new MutationObserver(() => {
-      if (document.querySelector("div[role='listitem']")) {
-        observer.disconnect();
-        resolve();
-      }
-    });
-
-    observer.observe(document.documentElement, { childList: true, subtree: true });
-    setTimeout(() => {
-      observer.disconnect();
-      resolve();
-    }, 5000);
+function fireTextEvents(element) {
+  ["input", "change", "blur"].forEach((eventName) => {
+    element.dispatchEvent(new Event(eventName, { bubbles: true }));
   });
+}
+
+function setSelectValue(select, value) {
+  if (value === undefined) {
+    return;
+  }
+
+  const descriptor = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value");
+  descriptor?.set?.call(select, value);
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+  select.dispatchEvent(new Event("blur", { bubbles: true }));
+}
+
+function wait(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
